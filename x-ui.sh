@@ -418,8 +418,9 @@ show_banlog() {
 }
 
 bbr_menu() {
-    echo -e "${green}\t1.${plain} Enable BBR"
-    echo -e "${green}\t2.${plain} Disable BBR"
+    echo -e "${green}\t1.${plain} Enable Standard BBR (v1)"
+    echo -e "${green}\t2.${plain} Disable BBR (Back to CUBIC)"
+    echo -e "${green}\t3.${plain} Enable Advanced BBR (v2/v3)${yellow} [Requires Kernel 5.9+]${plain}"
     echo -e "${green}\t0.${plain} Back to Main Menu"
     read -rp "Choose an option: " choice
     case "$choice" in
@@ -432,6 +433,10 @@ bbr_menu() {
         ;;
     2)
         disable_bbr
+        bbr_menu
+        ;;
+    3)
+        enable_bbr_advanced
         bbr_menu
         ;;
     *)
@@ -449,17 +454,20 @@ disable_bbr() {
     fi
 
     # Replace BBR with CUBIC configurations
-    sed -i 's/net.core.default_qdisc=fq/net.core.default_qdisc=pfifo_fast/' /etc/sysctl.conf
-    sed -i 's/net.ipv4.tcp_congestion_control=bbr/net.ipv4.tcp_congestion_control=cubic/' /etc/sysctl.conf
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+
+    echo "net.core.default_qdisc=pfifo_fast" | tee -a /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=cubic" | tee -a /etc/sysctl.conf
 
     # Apply changes
-    sysctl -p
+    sysctl -p >/dev/null 2>&1
 
     # Verify that BBR is replaced with CUBIC
     if [[ $(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}') == "cubic" ]]; then
-        echo -e "${green}BBR has been replaced with CUBIC successfully.${plain}"
+        echo -e "${green}BBR has been disabled and replaced with CUBIC successfully.${plain}"
     else
-        echo -e "${red}Failed to replace BBR with CUBIC. Please check your system configuration.${plain}"
+        echo -e "${red}Failed to disable BBR. Please check your system configuration.${plain}"
     fi
 }
 
@@ -490,17 +498,51 @@ enable_bbr() {
     esac
 
     # Enable BBR
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+    
     echo "net.core.default_qdisc=fq" | tee -a /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" | tee -a /etc/sysctl.conf
 
     # Apply changes
-    sysctl -p
+    sysctl -p >/dev/null 2>&1
 
     # Verify that BBR is enabled
     if [[ $(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}') == "bbr" ]]; then
-        echo -e "${green}BBR has been enabled successfully.${plain}"
+        echo -e "${green}BBR v1 has been enabled successfully.${plain}"
     else
         echo -e "${red}Failed to enable BBR. Please check your system configuration.${plain}"
+    fi
+}
+
+enable_bbr_advanced() {
+    local kernel_version=$(uname -r | cut -d. -f1)
+    
+    # Basic check for kernel support (v2/v3 usually need 5.9+)
+    if [[ $kernel_version -lt 5 ]]; then
+        echo -e "${red}Your kernel version is too old for BBR v2/v3. Please upgrade your kernel first.${plain}"
+        return 1
+    fi
+
+    # Remove existing BBR settings first to avoid conflicts
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+
+    echo "net.core.default_qdisc=fq" | tee -a /etc/sysctl.conf
+    # Try BBRv3 first, then v2, then v1 as fallback
+    echo "net.ipv4.tcp_congestion_control=bbr3" | tee -a /etc/sysctl.conf
+
+    # Apply
+    sysctl -p >/dev/null 2>&1
+
+    local current_cc=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    
+    if [[ "$current_cc" == "bbr3" || "$current_cc" == "bbr2" ]]; then
+        echo -e "${green}Advanced BBR ($current_cc) enabled successfully.${plain}"
+    elif [[ "$current_cc" == "bbr" ]]; then
+        echo -e "${yellow}Kernel supports BBR v3/v2 only partially. Standard BBR enabled.${plain}"
+    else
+        echo -e "${red}Failed to enable Advanced BBR. Check kernel modules.${plain}"
     fi
 }
 
@@ -613,7 +655,7 @@ show_xray_status() {
 }
 
 firewall_menu() {
-    echo -e "${green}\t1.${plain} ${green}Install${plain} Firewall"
+    echo -e "${green}\t1.${plain} ${green}Install${plain} Firewall (UFW)"
     echo -e "${green}\t2.${plain} Port List [numbered]"
     echo -e "${green}\t3.${plain} ${green}Open${plain} Ports"
     echo -e "${green}\t4.${plain} ${red}Delete${plain} Ports from List"
@@ -1032,6 +1074,21 @@ ssl_cert_issue() {
         LOGI "Your domain is ready for issuing certificates now..."
     fi
 
+    # --- NEW: Select CA ---
+    echo -e "\n${green}Select Certificate Authority (CA):${plain}"
+    echo -e "1. Let's Encrypt (Default)"
+    echo -e "2. ZeroSSL"
+    read -rp "Select CA [1-2]: " ca_choice
+
+    if [[ "$ca_choice" == "2" ]]; then
+        LOGI "Setting CA to ZeroSSL..."
+        ~/.acme.sh/acme.sh --set-default-ca --server zerossl
+        echo -e "${yellow}Note: ZeroSSL might require you to register with an email via acme.sh if this is the first use.${plain}"
+    else
+        LOGI "Setting CA to Let's Encrypt..."
+        ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+    fi
+
     # create a directory for the certificate
     certPath="/root/cert/${domain}"
     if [ ! -d "$certPath" ]; then
@@ -1051,14 +1108,13 @@ ssl_cert_issue() {
     LOGI "Will use port: ${WebPort} to issue certificates. Please make sure this port is open."
 
     # issue the certificate
-    ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
     ~/.acme.sh/acme.sh --issue -d ${domain} --listen-v6 --standalone --httpport ${WebPort} --force
     if [ $? -ne 0 ]; then
         LOGE "Issuing certificate failed, please check logs."
         rm -rf ~/.acme.sh/${domain}
         exit 1
     else
-        LOGE "Issuing certificate succeeded, installing certificates..."
+        LOGI "Issuing certificate succeeded, installing certificates..."
     fi
 
     reloadCmd="x-ui restart"
@@ -1175,11 +1231,18 @@ ssl_cert_issue_CF() {
         read -rp "Input your email here: " CF_AccountEmail
         LOGD "Your registered email address is: ${CF_AccountEmail}"
 
-        # Set the default CA to Let's Encrypt
-        ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-        if [ $? -ne 0 ]; then
-            LOGE "Default CA, Let'sEncrypt fail, script exiting..."
-            exit 1
+        # --- NEW: Select CA ---
+        echo -e "\n${green}Select Certificate Authority (CA):${plain}"
+        echo -e "1. Let's Encrypt (Default)"
+        echo -e "2. ZeroSSL"
+        read -rp "Select CA [1-2]: " ca_choice
+
+        if [[ "$ca_choice" == "2" ]]; then
+            LOGI "Setting CA to ZeroSSL..."
+            ~/.acme.sh/acme.sh --set-default-ca --server zerossl
+        else
+            LOGI "Setting CA to Let's Encrypt..."
+            ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
         fi
 
         export CF_Key="${CF_GlobalKey}"
@@ -1211,7 +1274,7 @@ ssl_cert_issue_CF() {
         LOGI "Default --reloadcmd for ACME is: ${yellow}x-ui restart"
         LOGI "This command will run on every certificate issue and renew."
         read -rp "Would you like to modify --reloadcmd for ACME? (y/n): " setReloadcmd
-        if [[ "$setReloadcmd" == "y" || "$setReloadcmd" == "Y" ]]; then
+        if [[ "$setReloadcmd" == "y" || "$setReloadcmd" == "y" ]]; then
             echo -e "\n${green}\t1.${plain} Preset: systemctl reload nginx ; x-ui restart"
             echo -e "${green}\t2.${plain} Input your own command"
             echo -e "${green}\t0.${plain} Keep default reloadcmd"
@@ -1522,7 +1585,7 @@ install_iplimit() {
             pacman -Syu --noconfirm fail2ban
             ;;
         *)
-            echo -e "${red}Unsupported operating system. Please check the script and install the necessary packages manually.${plain}\n"
+            echo -e "${red}Unsupported operating system. Please check the script and install the install the necessary packages manually.${plain}\n"
             exit 1
             ;;
         esac
@@ -1697,6 +1760,158 @@ SSH_port_forwarding() {
     esac
 }
 
+# ==========================================
+# NEW FEATURES IMPLEMENTATION
+# ==========================================
+
+show_health_check() {
+    echo -e "${green}--- System Health Check${plain}"
+    
+    # CPU & RAM Usage
+    echo -e "\n${yellow}Resource Usage:${plain}"
+    if command -v free &>/dev/null; then
+        free -h | grep -E "Mem|Swap"
+    fi
+    # CPU Load
+    echo "Load Average: $(uptime | awk -F'load average:' '{print $2}')"
+
+    # Disk Usage
+    echo -e "\n${yellow}Disk Usage:${plain}"
+    df -h | grep -E "Filesystem|/$" | tail -1 | awk '{print "Filesystem:", $1, "\nTotal:", $2, "\nUsed:", $3, "("$5")", "\nAvailable:", $4}'
+
+    # System Load & Uptime
+    echo -e "\n${yellow}System Uptime:${plain}"
+    uptime
+
+    # Xray Active Connections
+    echo -e "\n${yellow}Active Xray Connections:${plain}"
+    local connections=$(ss -tunhp state established | grep xray-linux | wc -l)
+    echo -e "Total: $connections"
+
+    # Check if System is 64-bit
+    echo -e "\n${yellow}OS Arch:${plain}"
+    uname -m
+
+    # Current Kernel Version (for BBR check)
+    echo -e "\n${yellow}Kernel Version:${plain}"
+    uname -r
+
+    before_show_menu
+}
+
+geoip_block_menu() {
+    echo -e "\n${green}--- GeoIP Block for Panel Port ---${plain}"
+    echo -e "${yellow}Warning: Blocking your own country will lock you out!${plain}"
+    
+    # Get current panel port
+    local existing_port=$(/usr/local/x-ui/x-ui setting -show true | grep -Eo 'port: .+' | awk '{print $2}')
+
+    echo -e "${green}\t1.${plain} Block a Country (by Code)"
+    echo -e "${green}\t2.${plain} Unblock a Country"
+    echo -e "${green}\t3.${plain} List Blocked Countries"
+    echo -e "${green}\t4.${plain} Clear All GeoIP Blocks"
+    echo -e "${green}\t0.${plain} Back to Main Menu"
+    read -rp "Choose an option: " choice
+
+    case "$choice" in
+    0) show_menu ;;
+    1) block_country "$existing_port" ; geoip_block_menu ;;
+    2) unblock_country ; geoip_block_menu ;;
+    3) list_blocked_countries ; geoip_block_menu ;;
+    4) clear_geoip_blocks "$existing_port" ; geoip_block_menu ;;
+    *) echo -e "${red}Invalid option${plain}"; geoip_block_menu ;;
+    esac
+}
+
+install_ipset_if_needed() {
+    if ! command -v ipset &>/dev/null; then
+        case "${release}" in
+        ubuntu | debian | armbian) apt update && apt install -y ipset ;;
+        centos | almalinux | rocky | ol) yum install -y ipset ;;
+        fedora | amzn | virtuozzo) dnf install -y ipset ;;
+        arch | manjaro | parch) pacman -S --noconfirm ipset ;;
+        *) echo "Please install ipset manually"; return 1 ;;
+        esac
+    fi
+    return 0
+}
+
+block_country() {
+    local port=$1
+    read -rp "Enter 2-letter country code to block (e.g., CN, IR, RU): " country_code
+    country_code=$(echo "$country_code" | tr '[:lower:]' '[:upper:]')
+
+    if [[ -z "$country_code" || ${#country_code} -ne 2 ]]; then
+        echo -e "${red}Invalid country code.${plain}"
+        return 1
+    fi
+
+    confirm "Are you sure you want to block $country_code from accessing the panel port $port?" "n"
+    if [[ $? != 0 ]]; then return; fi
+
+    install_ipset_if_needed
+    if [[ $? != 0 ]]; then return; fi
+
+    echo -e "${green}Downloading IP list for $country_code...${plain}"
+    
+    # Remove existing set for this country to update it
+    ipset destroy "geoblock_$country_code" 2>/dev/null
+    ipset create "geoblock_$country_code" hash:net
+
+    # Download IPs from ipdeny.com
+    wget -q "http://www.ipdeny.com/ipblocks/data/countries/$country_code.zone" -O /tmp/$country_code.zone
+    
+    if [[ ! -f /tmp/$country_code.zone ]]; then
+        echo -e "${red}Failed to download list or invalid country code.${plain}"
+        return 1
+    fi
+
+    # Add IPs to ipset (might take time)
+    echo "Adding IPs to set..."
+    while read -r ip; do
+        ipset add "geoblock_$country_code" $ip
+    done < /tmp/$country_code.zone
+
+    # Apply iptables rule
+    iptables -I INPUT -p tcp --dport $port -m set --match-set "geoblock_$country_code" src -j DROP
+    # Save rules (basic attempt)
+    if command -v netfilter-persistent &>/dev/null; then netfilter-persistent save; fi
+    
+    echo -e "${green}Country $country_code blocked for port $port successfully!${plain}"
+    rm /tmp/$country_code.zone
+}
+
+unblock_country() {
+    read -rp "Enter country code to unblock: " country_code
+    country_code=$(echo "$country_code" | tr '[:lower:]' '[:upper:]')
+    
+    ipset destroy "geoblock_$country_code" 2>/dev/null
+    echo -e "${green}IPSet for $country_code destroyed.${plain}"
+}
+
+list_blocked_countries() {
+    echo -e "${green}Active IP Sets:${plain}"
+    ipset list -n | grep geoblock_
+}
+
+clear_geoip_blocks() {
+    local port=$1
+    confirm "Remove all GeoIP blocks for the panel?" "n"
+    if [[ $? == 0 ]]; then
+        # Destroy all geoblock sets
+        for set in $(ipset list -n | grep geoblock_); do
+            ipset destroy $set 2>/dev/null
+        done
+        
+        # Crude cleanup of iptables rule matching the port
+        # Note: This deletes the top-most DROP rule on that port to simplify logic
+        iptables -L INPUT -n --line-numbers | grep "dpt:$port" | grep "DROP" | awk '{print $1}' | sort -rn | head -1 | xargs -I {} iptables -D INPUT {}
+        
+        echo -e "${green}All GeoIP blocks cleared.${plain}"
+    fi
+}
+
+
 show_usage() {
     echo -e "┌───────────────────────────────────────────────────────┐
 │  ${blue}x-ui control menu usages (subcommands):${plain}              │
@@ -1748,16 +1963,18 @@ show_menu() {
 │  ${green}18.${plain} SSL Certificate Management                │
 │  ${green}19.${plain} Cloudflare SSL Certificate                │
 │  ${green}20.${plain} IP Limit Management                       │
-│  ${green}21.${plain} Firewall Management                       │
+│  ${green}21.${plain} Firewall Management                        │
 │  ${green}22.${plain} SSH Port Forwarding Management            │
 │────────────────────────────────────────────────│
 │  ${green}23.${plain} Enable BBR                                │
 │  ${green}24.${plain} Update Geo Files                          │
 │  ${green}25.${plain} Speedtest by Ookla                        │
-╚────────────────────────────────────────────────╝
+│  ${green}26.${plain} System Health Check                       │
+│  ${green}27.${plain} GeoIP Block (Panel Port)                  │
+╚══════════════════════════════════════════════════╝
 "
     show_status
-    echo && read -rp "Please enter your selection [0-25]: " num
+    echo && read -rp "Please enter your selection [0-27]: " num
 
     case "${num}" in
     0)
@@ -1838,8 +2055,14 @@ show_menu() {
     25)
         run_speedtest
         ;;
+    26)
+        show_health_check
+        ;;
+    27)
+        geoip_block_menu
+        ;;
     *)
-        LOGE "Please enter the correct number [0-25]"
+        LOGE "Please enter the correct number [0-27]"
         ;;
     esac
 }
