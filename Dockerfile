@@ -1,7 +1,9 @@
 # ========================================================
 # Stage: Builder
 # ========================================================
-FROM golang:1.24-alpine AS builder
+# اصلاح 1: استفاده از نسخه پایدار گو (1.23) به جای نسخه فرضی/آینده
+FROM golang:1.23-alpine AS builder
+
 WORKDIR /app
 ARG TARGETARCH
 
@@ -11,6 +13,12 @@ RUN apk --no-cache --update add \
   wget \
   unzip
 
+# --- اصلاح 2: بهینه‌سازی کش (Docker Layer Caching) ---
+# اول ماژول‌ها را کپی کن، وابستگی‌ها را دانلود کن (تا اگر کد سورس عوض شد، دانلود دوباره نشود)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# حالا بقیه فایل‌ها را کپی کن و بیلد بگیر
 COPY . .
 
 ENV CGO_ENABLED=1
@@ -22,7 +30,12 @@ RUN ./DockerInit.sh "$TARGETARCH"
 # Stage: Final Image of 3x-ui
 # ========================================================
 FROM alpine
-ENV TZ=Asia/Tehran
+
+# --- اصلاح 3: ساعت به عنوان متغیر (ARG) ---
+# اگر کاربر هنگام بیلد آرگومان ندهد، تهران در نظر گرفته می‌شود
+ARG TZ=Asia/Tehran
+ENV TZ=${TZ}
+
 WORKDIR /app
 
 RUN apk add --no-cache --update \
@@ -34,7 +47,6 @@ RUN apk add --no-cache --update \
 COPY --from=builder /app/build/ /app/
 COPY --from=builder /app/DockerEntrypoint.sh /app/
 COPY --from=builder /app/x-ui.sh /usr/bin/x-ui
-
 
 # Configure fail2ban
 RUN rm -f /etc/fail2ban/jail.d/alpine-ssh.conf \
