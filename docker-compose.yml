@@ -1,14 +1,41 @@
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:latest
+    # --- ارتقا 1: قفل کردن نسخه به جای latest ---
+    # بهتر است به جای latest، شماره نسخه ثابت (مثلا v1.8.0) را بگذارید
+    image: ghcr.io/mhsanaei/3x-ui:latest 
+    
     container_name: 3x-ui
     hostname: yourhostname
+    
     volumes:
       - $PWD/db/:/etc/x-ui/
       - $PWD/cert/:/root/cert/
+    
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
       X_UI_ENABLE_FAIL2BAN: "true"
+    
     tty: true
+    
+    # استفاده از شبکه هاست برای عملکرد بهتر پروکسی
     network_mode: host
+    
     restart: unless-stopped
+    
+    # --- ارتقا 2: محدود کردن منابع (Resource Limits) ---
+    # جلوگیری از پر شدن رم یا CPU توسط کانتینر
+    deploy:
+      resources:
+        limits:
+          cpus: '2'        # حداکثر استفاده از 2 هسته
+          memory: 512M      # حداکثر استفاده از 512 مگابایت رم
+        reservations:
+          memory: 256M      # حداقل رم مورد نیاز
+
+    # --- ارتقا 3: بررسی سلامت (Healthcheck) ---
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:20543/"] # پورت پیش‌فرض را چک کن (یا پورت تنظیم شده)
+      interval: 30s    # هر 30 ثانیه چک کن
+      timeout: 10s     # بعد از 10 ثانیه تایم‌اوت
+      retries: 3       # اگر 3 بار شکست خورد، کانتینر را Unhealthy کن
+      start_period: 40s # 40 ثانیه اول استارت صبر کن
