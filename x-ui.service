@@ -1,15 +1,43 @@
 [Unit]
 Description=x-ui Service
-After=network.target
-Wants=network.target
+# Wait until network is fully online and DNS is resolved
+After=network-online.target nss-lookup.target
+Wants=network-online.target
 
 [Service]
-Environment="XRAY_VMESS_AEAD_FORCED=false"
 Type=simple
+User=root
+Environment="XRAY_VMESS_AEAD_FORCED=false"
 WorkingDirectory=/usr/local/x-ui/
 ExecStart=/usr/local/x-ui/x-ui
 Restart=on-failure
 RestartSec=5s
+
+# --- بخش امنیتی و پایداری جدید ---
+
+# امنیت: جلوگیری از نوشتن در فایل‌های سیستمی (مثل /bin, /etc)
+ProtectSystem=full
+# اجازه نوشتن فقط در این دو مسیر خاص (برای دیتابیس و لاگ)
+ReadWritePaths=/usr/local/x-ui /var/log
+
+# پایداری: محدود کردن حافظه RAM (مثلا 500 مگابایت)
+# اگر پنل باگ داشت و رم را پر کرد، کل سرور خاموش نمی‌شود
+MemoryLimit=512M
+
+# امنیت: استفاده از پارتیشن /tmp جداگانه (جلوگیری از حملات race condition)
+PrivateTmp=true
+
+# امنیت: جلوگیری از تغییرات غیرمجاز در تنظیمات سخت‌افزاری
+DevicePolicy=strict
+# فقط اجازه استفاده از کارت شبکه (برای پروکسی) را بده
+DeviceAllow=/dev/net/tun rw
+
+# امنیت: محدود کردن دسترسی به سیستم فایل‌های حساس
+ProtectControlGroups=true
+ProtectKernelModules=true
+
+# لاگینگ: مشخص کردن شناسه لاگ برای پیدا کردن راحت‌تر
+SyslogIdentifier=x-ui
 
 [Install]
 WantedBy=multi-user.target
