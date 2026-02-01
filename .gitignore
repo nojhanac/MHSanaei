@@ -32,9 +32,26 @@ Thumbs.db
 # Ignore Go specific files
 *.exe
 *.exe~
+vendor/
+
+# --- ارتقا 1: نادیده گرفتن دیتابیس ---
+# فایل‌های دیتابیس لوکال نباید در گیت باشند
+*.db
+*.db-shm
+*.db-wal
+
+# --- ارتقا 2: نادیده گرفتن گواهی‌های SSL (امنیتی) ---
+# کلیدهای خصوصی و فایل‌های گواهی نباید اشتراک گذاشته شوند
+*.pem
+*.key
+*.crt
+fullchain.pem
+privkey.pem
 
 # Ignore Docker specific files
 docker-compose.override.yml
 
 # Ignore .env (Environment Variables) file
 .env
+.env.local
+.env.*.local
