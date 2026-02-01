@@ -39,7 +39,36 @@ arch() {
 
 echo "Arch: $(arch)"
 
+install_base() {
+    case "${release}" in
+    ubuntu | debian | armbian)
+        apt-get update && apt-get install -y -q wget curl tar tzdata binutils
+        ;;
+    centos | almalinux | rocky | ol)
+        yum -y update && yum install -y -q wget curl tar tzdata binutils
+        ;;
+    fedora | amzn | virtuozzo)
+        dnf -y update && dnf install -y -q wget curl tar tzdata binutils
+        ;;
+    arch | manjaro | parch)
+        pacman -Syu && pacman -Syu --noconfirm wget curl tar tzdata binutils
+        ;;
+    opensuse-tumbleweed)
+        zypper refresh && zypper -q install -y wget curl tar timezone
+        ;;
+    *)
+        apt-get update && apt install -y -q wget curl tar tzdata binutils
+        ;;
+    esac
+}
+
+# Moved GLIBC check after install_base to ensure 'ldd' exists
 check_glibc_version() {
+    if ! command -v ldd &> /dev/null; then
+        echo -e "${red}Warning: ldd command not found. Skipping GLIBC check.${plain}"
+        return
+    fi
+
     glibc_version=$(ldd --version | head -n1 | awk '{print $NF}')
     
     required_version="2.32"
@@ -49,30 +78,6 @@ check_glibc_version() {
         exit 1
     fi
     echo "GLIBC version: $glibc_version (meets requirement of 2.32+)"
-}
-check_glibc_version
-
-install_base() {
-    case "${release}" in
-    ubuntu | debian | armbian)
-        apt-get update && apt-get install -y -q wget curl tar tzdata
-        ;;
-    centos | almalinux | rocky | ol)
-        yum -y update && yum install -y -q wget curl tar tzdata
-        ;;
-    fedora | amzn | virtuozzo)
-        dnf -y update && dnf install -y -q wget curl tar tzdata
-        ;;
-    arch | manjaro | parch)
-        pacman -Syu && pacman -Syu --noconfirm wget curl tar tzdata
-        ;;
-    opensuse-tumbleweed)
-        zypper refresh && zypper -q install -y wget curl tar timezone
-        ;;
-    *)
-        apt-get update && apt install -y -q wget curl tar tzdata
-        ;;
-    esac
 }
 
 gen_random_string() {
@@ -141,14 +146,23 @@ config_after_install() {
 install_x-ui() {
     cd /usr/local/
 
+    # --- ارتقا 1: بکاپ خودکار دیتابیس ---
+    if [[ -e /usr/local/x-ui/x-ui.db ]]; then
+        echo -e "${yellow}Existing database found. Backing up to /root/x-ui.db.backup...${plain}"
+        cp /usr/local/x-ui/x-ui.db /root/x-ui.db.backup.$(date +%Y%m%d_%H%M%S)
+    fi
+
     if [ $# == 0 ]; then
-        tag_version=$(curl -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        # --- ارتقا 2: اضافه کردن تایم‌اوت به wget ---
+        tag_version=$(curl -Ls --connect-timeout 10 --max-time 30 "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$tag_version" ]]; then
             echo -e "${red}Failed to fetch x-ui version, it may be due to GitHub API restrictions, please try it later${plain}"
             exit 1
         fi
-        echo -e "Got x-ui latest version: ${tag_version}, beginning the installation..."
-        wget -N -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
+        echo -e "Got x-ui latest version: ${tag_version}, beginning to installation..."
+        
+        wget --timeout=30 --tries=3 -N -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
+        
         if [[ $? -ne 0 ]]; then
             echo -e "${red}Downloading x-ui failed, please be sure that your server can access GitHub ${plain}"
             exit 1
@@ -165,7 +179,9 @@ install_x-ui() {
 
         url="https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz"
         echo -e "Beginning to install x-ui $1"
-        wget -N -O /usr/local/x-ui-linux-$(arch).tar.gz ${url}
+        
+        wget --timeout=30 --tries=3 -N -O /usr/local/x-ui-linux-$(arch).tar.gz ${url}
+        
         if [[ $? -ne 0 ]]; then
             echo -e "${red}Download x-ui $1 failed, please check if the version exists ${plain}"
             exit 1
@@ -182,7 +198,7 @@ install_x-ui() {
     cd x-ui
     chmod +x x-ui
 
-    # Check the system's architecture and rename the file accordingly
+    # Check system's architecture and rename file accordingly
     if [[ $(arch) == "armv5" || $(arch) == "armv6" || $(arch) == "armv7" ]]; then
         mv bin/xray-linux-$(arch) bin/xray-linux-arm
         chmod +x bin/xray-linux-arm
@@ -190,9 +206,24 @@ install_x-ui() {
 
     chmod +x x-ui bin/xray-linux-$(arch)
     cp -f x-ui.service /etc/systemd/system/
-    wget -O /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
-    chmod +x /usr/local/x-ui/x-ui.sh
-    chmod +x /usr/bin/x-ui
+
+    # --- ارتقا 3: سوال برای بازنویسی اسکریپت مدیریت ---
+    if [[ -f "/usr/bin/x-ui" ]]; then
+        read -rp "Management script /usr/bin/x-ui already exists. Overwrite with latest version? [y/N]: " overwrite_script
+        if [[ "${overwrite_script}" == "y" || "${overwrite_script}" == "Y" ]]; then
+            wget --timeout=30 -O /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
+            chmod +x /usr/local/x-ui/x-ui.sh
+            chmod +x /usr/bin/x-ui
+            echo -e "${green}Management script updated.${plain}"
+        else
+            echo -e "${yellow}Keeping existing management script.${plain}"
+        fi
+    else
+        wget --timeout=30 -O /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
+        chmod +x /usr/local/x-ui/x-ui.sh
+        chmod +x /usr/bin/x-ui
+    fi
+
     config_after_install
 
     systemctl daemon-reload
@@ -222,4 +253,5 @@ install_x-ui() {
 
 echo -e "${green}Running...${plain}"
 install_base
+check_glibc_version
 install_x-ui $1
